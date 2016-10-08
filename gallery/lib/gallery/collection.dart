@@ -38,4 +38,11 @@ final List<GalleryItem> kGalleryCollection = <GalleryItem>[
     href: '/email/menu',
     builder: (BuildContext context) => new EmailMenuScreen(),
   ),
+  new GalleryItem(
+    title: 'Contact - Full Details',
+    subtitle: 'Full Contact Details',
+    group: GalleryGroups.screen,
+    href: '/contact/details_full',
+    builder: (BuildContext context) => new ContactDetailsFullScreen(),
+  ),
 ];
