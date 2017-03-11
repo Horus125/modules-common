@@ -2,7 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import 'dart:convert';
+
 import 'package:application.lib.app.dart/app.dart';
+import 'package:application.services/application_controller.fidl.dart';
+import 'package:application.services/application_environment.fidl.dart';
+import 'package:application.services/application_environment_host.fidl.dart';
+import 'package:application.services/application_launcher.fidl.dart';
 import 'package:application.services/service_provider.fidl.dart';
 import 'package:apps.modular.services.module/module.fidl.dart';
 import 'package:apps.modular.services.module/module_context.fidl.dart';
@@ -10,11 +16,15 @@ import 'package:apps.modular.services.module/module_controller.fidl.dart';
 import 'package:apps.modular.services.story/link.fidl.dart';
 import 'package:apps.mozart.lib.flutter/child_view.dart';
 import 'package:apps.mozart.services.views/view_token.fidl.dart';
+import 'package:apps.web_view.services/web_view.fidl.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:lib.fidl.dart/bindings.dart';
 import 'package:lib.fidl.dart/core.dart';
 
 final ApplicationContext _context = new ApplicationContext.fromStartupInfo();
+final ApplicationEnvironmentProxy _childEnvironment = _initChildEnvironment();
+final ApplicationLauncherProxy _childLauncher = _initLauncher();
 
 final String _kEmailServiceUrl = 'file:///system/apps/email_service';
 final String _kEmailSessionUrl = 'file:///system/apps/email_session';
@@ -22,6 +32,18 @@ final String _kEmailNavUrl = 'file:///system/apps/email_nav';
 final String _kEmailListUrl = 'file:///system/apps/email_list';
 final String _kEmailListGridUrl = 'file:///system/apps/email_list_grid';
 final String _kEmailThreadUrl = 'file:///system/apps/email_thread';
+
+final String _kWebViewUrl = 'file:///system/apps/web_view';
+final String _kClientId = 'ENTER_CLIENT_ID_HERE';
+final String _kCallbackUrl = 'com.fuchsia.googleauth:/oauth2redirect';
+
+final List<String> _kScopes = <String>[
+  'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/userinfo.email',
+  'https://www.googleapis.com/auth/userinfo.profile',
+  'https://www.googleapis.com/auth/contacts',
+  'https://www.googleapis.com/auth/plus.login',
+];
 
 final GlobalKey<HomeScreenState> _kHomeKey = new GlobalKey<HomeScreenState>();
 
@@ -31,9 +53,106 @@ ChildViewConnection _connNav;
 ChildViewConnection _connList;
 ChildViewConnection _connListGrid;
 ChildViewConnection _connThread;
+ChildViewConnection _connWebView;
+
+bool _authCompleted = false;
 
 void _log(String msg) {
   print('[email_story] $msg');
+}
+
+class ApplicationEnvironmentHostImpl extends ApplicationEnvironmentHost {
+  final ApplicationEnvironmentHostBinding _binding =
+      new ApplicationEnvironmentHostBinding();
+
+  void bind(InterfaceRequest<ApplicationEnvironmentHost> request) {
+    _binding.bind(this, request);
+  }
+
+  InterfaceHandle<ApplicationEnvironmentHost> getInterfaceHandle() {
+    return _binding.wrap(this);
+  }
+
+  @override
+  void getApplicationEnvironmentServices(
+      InterfaceRequest<ServiceProvider> services) {
+    ServiceProviderImpl impl = new ServiceProviderImpl()
+      ..bind(services)
+      // ..addServiceForName((request) {
+      //   new PresenterImpl().bind(request);
+      // }, Presenter.serviceName)
+      ..defaultConnector = (String serviceName, InterfaceRequest request) {
+        _context.environmentServices
+            .connectToService(serviceName, request.passChannel());
+      };
+    // TODO(abarth): Add a proper BindingSet to the FIDL Dart bindings so we
+    // accumulate all these service provider impls.
+    _serviceProviders.add(impl);
+  }
+
+  List<ServiceProviderImpl> _serviceProviders = <ServiceProviderImpl>[];
+}
+
+final ApplicationEnvironmentHostImpl _environmentHost =
+    new ApplicationEnvironmentHostImpl();
+
+ApplicationEnvironmentProxy _initChildEnvironment() {
+  final ApplicationEnvironmentProxy proxy = new ApplicationEnvironmentProxy();
+  _context.environment.createNestedEnvironment(
+    _environmentHost.getInterfaceHandle(),
+    proxy.ctrl.request(),
+    null,
+    'email',
+  );
+  return proxy;
+}
+
+ApplicationLauncherProxy _initLauncher() {
+  final ApplicationLauncherProxy proxy = new ApplicationLauncherProxy();
+  _childEnvironment.getApplicationLauncher(proxy.ctrl.request());
+  return proxy;
+}
+
+class ChildApplication {
+  ChildApplication(
+      {this.controller, this.connection, this.title, this.services});
+
+  factory ChildApplication.create(String url, {String title}) {
+    final ApplicationControllerProxy controller =
+        new ApplicationControllerProxy();
+
+    final ServiceProviderProxy services = new ServiceProviderProxy();
+
+    ChildViewConnection connection = new ChildViewConnection.launch(
+        url, _childLauncher,
+        controller: controller.ctrl.request(),
+        childServices: services.ctrl.request());
+
+    return new ChildApplication(
+      controller: controller,
+      connection: connection,
+      title: title,
+      services: services,
+    );
+  }
+
+  factory ChildApplication.view(InterfaceHandle<ViewOwner> viewOwner) {
+    return new ChildApplication(
+      connection: new ChildViewConnection(viewOwner),
+    );
+  }
+
+  void close() {
+    if (controller != null) {
+      controller.kill();
+      controller.ctrl.close();
+    }
+  }
+
+  final ApplicationControllerProxy controller;
+  final ChildViewConnection connection;
+  final String title;
+  final ServiceProviderProxy services;
 }
 
 /// A wrapper class for duplicating ServiceProvider
@@ -78,6 +197,10 @@ class ModuleImpl extends Module {
   final List<ServiceProviderWrapper> serviceProviders =
       <ServiceProviderWrapper>[];
 
+  ChildApplication _childApp;
+  WebViewProxy _webView;
+  WebRequestDelegateImpl _webRequestDelegate;
+
   /// Bind an [InterfaceRequest] for a [Module] interface to this object.
   void bind(InterfaceRequest<Module> request) {
     _binding.bind(this, request);
@@ -95,6 +218,25 @@ class ModuleImpl extends Module {
 
     moduleContext.ctrl.bind(moduleContextHandle);
     link.ctrl.bind(linkHandle);
+
+    // Launch the web view for authentication.
+    _childApp = new ChildApplication.create(_kWebViewUrl);
+    _webView = new WebViewProxy();
+    connectToService(_childApp.services, _webView.ctrl);
+
+    final String url = 'https://accounts.google.com/o/oauth2/v2/auth?'
+        'scope=${_kScopes.join('%20')}'
+        '&response_type=code'
+        '&redirect_uri=$_kCallbackUrl' +
+        '&client_id=${_kClientId}';
+
+    print('URL is ' + url);
+
+    _webView.setUrl(url);
+
+    _webRequestDelegate = new WebRequestDelegateImpl(link: link);
+    _webView.setWebRequestDelegate(_webRequestDelegate.getInterfaceHandle());
+    _connWebView = _childApp.connection;
 
     // Binding between email service and email session.
     InterfacePair<ServiceProvider> emailServiceBinding =
@@ -197,6 +339,63 @@ class ModuleImpl extends Module {
   }
 }
 
+class WebRequestDelegateImpl extends WebRequestDelegate {
+  final WebRequestDelegateBinding _binding = new WebRequestDelegateBinding();
+  final Link link;
+
+  WebRequestDelegateImpl({this.link});
+
+  void bind(InterfaceRequest<WebRequestDelegate> request) {
+    _binding.bind(this, request);
+  }
+
+  InterfaceHandle<WebRequestDelegate> getInterfaceHandle() {
+    return _binding.wrap(this);
+  }
+
+  @override
+  void willSendRequest(String url) {
+    String code;
+    if (url.startsWith(_kCallbackUrl)) {
+      print(Uri.splitQueryString(url));
+      code = Uri.splitQueryString(url)[_kCallbackUrl + '?code'];
+    } else {
+      return;
+    }
+
+    final kAccessTokenURL = 'https://www.googleapis.com/oauth2/v4/token';
+
+    // TODO(mikejurka): verify that 'code' is correct format
+    var data = {
+      'code': code,
+      'client_id': _kClientId,
+      'grant_type': 'authorization_code',
+      'redirect_uri': _kCallbackUrl
+    };
+
+    createHttpClient().post(kAccessTokenURL, body: data).then((response) {
+      print('Response status: ${response.statusCode}');
+      print('Response body: ${response.body}');
+
+      var tokenMap = JSON.decode(response.body);
+      print('Access token:');
+      print(tokenMap['access_token']);
+
+      // Put the response body as a JSON value in the root link.
+      tokenMap['scopes'] = _kScopes;
+      tokenMap['client_id'] = _kClientId;
+      link.set(<String>['auth'], JSON.encode(tokenMap));
+      _authCompleted = true;
+      updateUI();
+    });
+  }
+
+  /// Updates the UI by calling setState on the [HomeScreenState] object.
+  void updateUI() {
+    _kHomeKey.currentState?.updateUI();
+  }
+}
+
 /// The top level [StatefulWidget].
 class HomeScreen extends StatefulWidget {
   /// Creates a new [HomeScreen].
@@ -212,6 +411,13 @@ class HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_authCompleted) {
+      return new Container(
+        child: new ChildView(connection: _connWebView),
+        constraints: const BoxConstraints.expand(),
+      );
+    }
+
     Widget nav = new Expanded(
       flex: 2,
       child: new Column(
@@ -221,20 +427,6 @@ class HomeScreenState extends State<HomeScreen> {
             child: _connNav != null
                 ? new ChildView(connection: _connNav)
                 : new Container(),
-          ),
-          new Container(
-            padding: new EdgeInsets.all(10.0),
-            child: new Align(
-              alignment: FractionalOffset.bottomLeft,
-              child: new FloatingActionButton(
-                child: new Icon(_grid ? Icons.list : Icons.grid_on),
-                onPressed: () {
-                  setState(() {
-                    _grid = !_grid;
-                  });
-                },
-              ),
-            ),
           ),
         ],
       ),

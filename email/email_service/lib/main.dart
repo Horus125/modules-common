@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:application.lib.app.dart/app.dart';
 import 'package:application.services/service_provider.fidl.dart';
@@ -32,6 +33,9 @@ class ModuleImpl extends Module {
 
   final EmailServiceImpl _emailServiceImpl = new EmailServiceImpl();
 
+  final LinkProxy _link = new LinkProxy();
+  LinkWatcherImpl _linkWatcher;
+
   /// Bind an [InterfaceRequest] for a [Module] interface to this object.
   void bind(InterfaceRequest<Module> request) {
     _binding.bind(this, request);
@@ -46,6 +50,11 @@ class ModuleImpl extends Module {
     InterfaceRequest<ServiceProvider> outgoingServicesRequest,
   ) {
     _log('ModuleImpl::initialize call');
+
+    // TODO: register link watcher and receive all the necessary data.
+    _link.ctrl.bind(linkHandle);
+    _linkWatcher = new LinkWatcherImpl(_emailServiceImpl);
+    _link.watch(_linkWatcher.getInterfaceHandle());
 
     // Register the service provider which can serve the `Threads` service.
     outgoingServices
@@ -63,7 +72,48 @@ class ModuleImpl extends Module {
   void stop(void callback()) {
     _log('ModuleImpl::stop call');
     _emailServiceImpl.close();
+    _linkWatcher.close();
+    _link.ctrl.close();
     callback();
+  }
+}
+
+class LinkWatcherImpl extends LinkWatcher {
+  final LinkWatcherBinding _binding = new LinkWatcherBinding();
+  final EmailServiceImpl _emailServiceImpl;
+
+  LinkWatcherImpl(this._emailServiceImpl);
+
+  InterfaceHandle<LinkWatcher> getInterfaceHandle() => _binding.wrap(this);
+
+  void close() {
+    _binding.close();
+  }
+
+  @override
+  void notify(String json) {
+    _log('JSON Link Notify');
+    _log(json);
+
+    if (json == null || json == 'null') {
+      return;
+    }
+
+    dynamic root = JSON.decode(json);
+    dynamic auth = root['auth'];
+
+    if (auth != null) {
+      _emailServiceImpl.initialize(
+        id: auth['client_id'],
+        secret: auth['client_secret'],
+        token: auth['access_token'],
+        expiry: new DateTime.now().toUtc()
+          ..add(new Duration(seconds: auth['expires_in'])),
+        refreshToken:
+            null, // NOTE: refresh token doesn't work as expected for some unknown reason.
+        scopes: auth['scopes'],
+      );
+    }
   }
 }
 

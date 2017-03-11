@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import 'dart:math';
+
 import 'package:collection/collection.dart';
 import 'package:quiver/core.dart' as quiver;
 import 'package:widgets_meta/widgets_meta.dart';
@@ -84,6 +86,19 @@ class Thread {
     } else {
       return '(No Subject)';
     }
+  }
+
+  /// Gets the most recent timestamp of all the messages in this email thread.
+  DateTime get timestamp {
+    if (messages == null || messages.isEmpty) {
+      return null;
+    }
+
+    return messages
+        .map((Message m) => m.timestamp)
+        .reduce((DateTime d1, DateTime d2) {
+      return d1.compareTo(d2) < 0 ? d2 : d1;
+    });
   }
 
   @override

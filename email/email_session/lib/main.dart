@@ -60,7 +60,7 @@ class ModuleImpl extends Module {
     _incomingServices.ctrl.bind(incomingServices);
 
     // TODO(alangardner): Temporarily start with mock data
-    EmailSessionDoc sessionState = new EmailSessionDoc.withMockData();
+    EmailSessionDoc sessionState = new EmailSessionDoc();
 
     _emailSessionImpl = new EmailSessionImpl(
       emailSessionLinkProxy,

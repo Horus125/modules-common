@@ -8,10 +8,9 @@ import 'dart:convert';
 import 'package:apps.modules.email.services/email_service.fidl.dart' as es;
 import 'package:email_api/email_api.dart';
 import 'package:lib.fidl.dart/bindings.dart' as bindings;
+import 'package:meta/meta.dart';
 import 'package:models/email.dart';
 import 'package:models/user.dart';
-
-import 'api.dart';
 
 void _log(String msg) {
   print('[email_service] $msg');
@@ -20,6 +19,7 @@ void _log(String msg) {
 /// Implementation for email_service.
 class EmailServiceImpl extends es.EmailService {
   final es.EmailServiceBinding _binding = new es.EmailServiceBinding();
+  final Completer<EmailAPI> _api = new Completer<EmailAPI>();
 
   /// Binds this implementation to the incoming [bindings.InterfaceRequest].
   ///
@@ -32,13 +32,32 @@ class EmailServiceImpl extends es.EmailService {
   /// Close the binding
   void close() => _binding.close();
 
+  /// Initialize the API with the given data.
+  void initialize({
+    @required String id,
+    @required String secret,
+    @required String token,
+    @required DateTime expiry,
+    @required String refreshToken,
+    @required List<String> scopes,
+  }) {
+    _api.complete(new EmailAPI(
+      id: id,
+      secret: secret,
+      token: token,
+      expiry: expiry,
+      refreshToken: refreshToken,
+      scopes: scopes,
+    ));
+  }
+
   @override
   Future<Null> me(
     void callback(es.User user),
   ) async {
     _log('* me() called');
 
-    EmailAPI api = await API.get();
+    EmailAPI api = await _api.future;
     User me = await api.me();
 
     String payload = JSON.encode(me);
@@ -57,7 +76,7 @@ class EmailServiceImpl extends es.EmailService {
     void callback(List<es.Label> labels),
   ) async {
     _log('* labels() called');
-    EmailAPI api = await API.get();
+    EmailAPI api = await _api.future;
     List<Label> labels = await api.labels();
 
     List<es.Label> results = labels.map((Label label) {
@@ -80,7 +99,7 @@ class EmailServiceImpl extends es.EmailService {
   ) async {
     _log('* threads() called');
 
-    EmailAPI api = await API.get();
+    EmailAPI api = await _api.future;
     List<Thread> threads = await api.threads(
       labelId: labelId,
       max: max,

@@ -27,7 +27,7 @@ class EmailAPI {
   /// Google OAuth scopes.
   List<String> scopes;
   Client _baseClient;
-  AutoRefreshingAuthClient _client;
+  AuthClient _client;
   gmail.GmailApi _gmail;
 
   /// The [EmailAPI] constructor.
@@ -40,17 +40,17 @@ class EmailAPI {
     @required this.scopes,
   }) {
     assert(id != null);
-    assert(secret != null);
     assert(token != null);
     assert(expiry != null);
-    assert(refreshToken != null);
 
     ClientId clientId = new ClientId(id, secret);
     AccessToken accessToken = new AccessToken('Bearer', token, expiry);
     AccessCredentials credentials =
         new AccessCredentials(accessToken, refreshToken, scopes);
     _baseClient = new Client();
-    _client = autoRefreshingClient(clientId, credentials, _baseClient);
+    _client = refreshToken != null
+        ? autoRefreshingClient(clientId, credentials, _baseClient)
+        : authenticatedClient(_baseClient, credentials);
     _gmail = new gmail.GmailApi(_client);
   }
 
@@ -197,7 +197,11 @@ class EmailAPI {
     });
 
     Stream<Thread> stream = new Stream<Thread>.fromFutures(requests);
-    List<Thread> threads = await stream.toList();
+    List<Thread> threads = await stream.toList()
+      ..sort((Thread t1, Thread t2) {
+        // Sort in reverse order.
+        return t2.timestamp.compareTo(t1.timestamp);
+      });
 
     return threads;
   }
